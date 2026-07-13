@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "chloe-avatar-demo",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["D:\\projects\\chloe-avatar\\serve.py", "--port", "8471"],
+      "port": 8471
+    }
+  ]
+}

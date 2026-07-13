@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#05060f" />
+<title>Chloe</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #05060f; overflow: hidden; }
+  #chloe { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+  #debug {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    display: none; flex-wrap: wrap; gap: 6px;
+    padding: 10px calc(10px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) 10px;
+    font: 12px system-ui, sans-serif; background: rgba(5,6,15,.55); backdrop-filter: blur(6px);
+  }
+  #debug.on { display: flex; }
+  #debug button {
+    background: #1e1b4b; color: #c7d2fe; border: 1px solid #4338ca; border-radius: 8px;
+    padding: 6px 10px; font: inherit;
+  }
+</style>
+</head>
+<body>
+<canvas id="chloe"></canvas>
+<div id="debug">
+  <button data-state="idle">idle</button>
+  <button data-state="listening">listening</button>
+  <button data-state="thinking">thinking</button>
+  <button data-state="speaking">speaking</button>
+  <button data-state="excited">excited</button>
+  <button data-state="wandering">wandering</button>
+  <button data-state="transmitting">transmit</button>
+  <button data-symbol="?">?</button>
+  <button data-symbol="check">&#10003;</button>
+  <button data-symbol="ellipsis">&#8230;</button>
+  <button data-symbol="!">!</button>
+  <button data-symbol="smiley">&#9786;</button>
+  <button data-symbol="heart">&#9825;</button>
+</div>
+
+<script src="vendor/three.min.js"></script>
+<script src="shaders/chloe-shaders.js"></script>
+<script src="ChloeAvatar.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  // Fullscreen host for the FULL v6 build (ChloeAvatar.js): idle / listening /
+  // thinking (neuron fire + cascades) / excited / wandering / transmitting,
+  // plus symbol formation (? [check] [ellipsis] !). This page is plumbing only —
+  // the avatar design lives untouched in ChloeAvatar.js.
+
+  const QS = new URLSearchParams(location.search);
+  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+
+  const avatar = new ChloeAvatar(document.getElementById('chloe'), {
+    quality: isMobile ? 'low' : 'high',
+    cloudScale: isMobile ? 0.55 : 0.62,
+  });
+  if (window.CHLOE_TUNING) avatar.setTuning(window.CHLOE_TUNING);
+
+  // Expose the documented embed API: ChloeAvatar.setState(...) must work from
+  // same-origin iframes and Android's evaluateJavascript, so the instance
+  // shadows the class on window (consumers never construct their own).
+  window.avatar = avatar;
+  window.ChloeAvatar = avatar;
+
+  // ── shared message schema (ws + postMessage), same as the core page ──
+  // {"state":..} {"symbol":..} {"amplitude":0-1} {"intensity":0-1}
+  // {"expression": "warmth" | {name, intensity}} — gesture vocabulary
+  // States idle/listening/thinking/speaking/excited/wandering/transmitting and
+  // symbol aliases (… ✓ :) ♡ etc.) are all native to the engine.
+  function handle(m) {
+    if (!m || typeof m !== 'object') return;
+    if (m.state !== undefined) avatar.setState(m.state);
+    if (m.symbol !== undefined) avatar.showSymbol(m.symbol);
+    if (m.amplitude !== undefined) avatar.setAudioLevel(+m.amplitude || 0);
+    if (m.intensity !== undefined) avatar.setThinkingIntensity(+m.intensity || 0);
+    if (m.expression !== undefined) {
+      const ex = m.expression;
+      if (typeof ex === 'string') avatar.setExpression(ex);
+      else if (ex && ex.name) avatar.setExpression(ex.name, ex.intensity);
+    }
+    // cross-origin-safe resize kick (embeds can't reach avatar._resize directly)
+    if (m.resize) avatar._resize();
+  }
+
+  window.addEventListener('message', (ev) => {
+    handle(ev.data && ev.data.chloe ? ev.data.chloe : ev.data);
+  });
+
+  // ── WebSocket control channel: ws://<page-host>:8765, ?ws= override, ?nows off ──
+  let ws = null, wsDelay = 1000;
+  function wsConnect() {
+    if (QS.has('nows')) return;
+    let wsUrl = QS.get('ws') || `${location.hostname || 'localhost'}:8765`;
+    if (!/^wss?:\/\//.test(wsUrl)) wsUrl = 'ws://' + wsUrl;
+    if (!/:\d+$/.test(wsUrl)) wsUrl += ':8765';
+    try { ws = new WebSocket(wsUrl); } catch { retry(); return; }
+    ws.onopen = () => { wsDelay = 1000; };
+    ws.onmessage = (ev) => {
+      try { handle(JSON.parse(ev.data)); } catch { /* non-JSON frame — ignore */ }
+    };
+    ws.onclose = retry;
+    ws.onerror = () => { try { ws.close(); } catch {} };
+  }
+  function retry() {
+    ws = null;
+    setTimeout(wsConnect, wsDelay);
+    wsDelay = Math.min(wsDelay * 2, 15000);
+  }
+  wsConnect();
+
+  // ── ?transparent → overlay mode ──
+  if (QS.has('transparent')) {
+    document.documentElement.style.background = 'transparent';
+    document.body.style.background = 'transparent';
+    document.getElementById('chloe').style.pointerEvents = 'none';
+  }
+
+  // ── ?debug → mini control strip ──
+  if (QS.has('debug')) {
+    const bar = document.getElementById('debug');
+    bar.classList.add('on');
+    bar.querySelectorAll('button[data-state]').forEach(b =>
+      b.addEventListener('click', () => avatar.setState(b.dataset.state)));
+    bar.querySelectorAll('button[data-symbol]').forEach(b =>
+      b.addEventListener('click', () => avatar.showSymbol(b.dataset.symbol)));
+  }
+})();
+</script>
+</body>
+</html>

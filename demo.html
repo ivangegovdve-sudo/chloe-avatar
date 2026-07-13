@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<meta name="theme-color" content="#05060f" />
+<title>Chloe Avatar — Control Panel</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #05060f; font: 13px/1.4 system-ui, "Segoe UI", sans-serif; color: #c7d2fe; }
+  #stage { position: fixed; inset: 0 0 var(--panel-h, 240px) 0; }
+  #stage iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #hud {
+    position: fixed; top: 8px; left: 10px; z-index: 5;
+    font: 11px ui-monospace, Consolas, monospace; color: #818cf8;
+    background: rgba(5,6,15,.5); padding: 4px 8px; border-radius: 6px;
+  }
+  #hud b { color: #e0e7ff; }
+  #hud .ws-connected { color: #4ade80; }
+  #hud .ws-disconnected, #hud .ws-error { color: #f87171; }
+  #hud .ws-connecting, #hud .ws-off { color: #facc15; }
+  #panel {
+    position: fixed; left: 0; right: 0; bottom: 0; height: var(--panel-h, 240px);
+    overflow-y: auto; padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+    background: rgba(10,12,26,.92); backdrop-filter: blur(8px);
+    border-top: 1px solid #1e1b4b; display: flex; flex-direction: column; gap: 8px;
+  }
+  .row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .lbl { color: #6d76c4; min-width: 58px; font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+  button {
+    background: #1e1b4b; color: #c7d2fe; border: 1px solid #4338ca; border-radius: 8px;
+    padding: 7px 12px; font: inherit; cursor: pointer;
+  }
+  button:active { transform: translateY(1px); }
+  button.active { background: #4338ca; color: #fff; }
+  button.sym { font-size: 16px; min-width: 42px; }
+  button.sw { min-width: 84px; border-color: transparent; color: #05060f; font-weight: 600; }
+  button.sw.active { outline: 2px solid #fff; }
+  input[type=range] { flex: 1; min-width: 120px; max-width: 260px; accent-color: #6366f1; }
+  .val { font: 11px ui-monospace, Consolas, monospace; color: #818cf8; min-width: 34px; }
+  a { color: #6d76c4; font-size: 11px; }
+</style>
+</head>
+<body>
+<div id="stage"><iframe id="frame" src="index.html?debug&nows" title="Chloe avatar"></iframe></div>
+<div id="hud">fps <b id="fps">–</b> · dots <b id="dots">–</b> · state <b id="st">–</b> · ws <b id="ws" class="ws-off">off</b></div>
+<div id="panel">
+  <div class="row">
+    <span class="lbl">state</span>
+    <button data-state="idle" class="active">idle</button>
+    <button data-state="listening">listening</button>
+    <button data-state="thinking">thinking</button>
+    <button data-state="speaking">speaking</button>
+    <button id="talk">fake speech</button>
+  </div>
+  <div class="row">
+    <span class="lbl">emotion</span>
+    <button class="sw" data-emotion="neutral" style="background:#6B8CFF">neutral</button>
+    <button class="sw" data-emotion="happy" style="background:#FFD700">happy</button>
+    <button class="sw" data-emotion="thinking" style="background:#FF8C00">thinking</button>
+    <button class="sw" data-emotion="listening" style="background:#00C9FF">listening</button>
+    <button class="sw" data-emotion="speaking" style="background:#FFF8F0">speaking</button>
+    <button class="sw" data-emotion="alert" style="background:#FF4444;color:#fff">alert</button>
+  </div>
+  <div class="row">
+    <span class="lbl">symbol</span>
+    <button class="sym" data-symbol="?">?</button>
+    <button class="sym" data-symbol="!">!</button>
+    <button class="sym" data-symbol="...">…</button>
+    <button class="sym" data-symbol="♡">♡</button>
+  </div>
+  <div class="row">
+    <span class="lbl">amplitude</span>
+    <input id="amp" type="range" min="0" max="1" step="0.01" value="0" />
+    <span class="val" id="ampv">0.00</span>
+    <span class="lbl">intensity</span>
+    <input id="intensity" type="range" min="0" max="1" step="0.01" value="0.5" />
+    <span class="val" id="intv">0.50</span>
+  </div>
+  <div class="row">
+    <a href="index.html?debug">index.html standalone</a> ·
+    <a href="demo-v6.html">v6 demo (ChloeAvatar.js build)</a> ·
+    <a id="wslink" href="?ws">reconnect ws</a>
+  </div>
+</div>
+<script>
+// The iframe loads index.html with ?nows (this panel is the driver); the
+// panel itself relays a live ws connection so the bridge can be tested here
+// too. Same-origin, so we drive the avatar directly via contentWindow.
+const frame = document.getElementById('frame');
+const api = () => frame.contentWindow && frame.contentWindow.ChloeAvatar;
+
+const mark = (attr, val) => document.querySelectorAll(`[data-${attr}]`).forEach(
+  (b) => b.classList.toggle('active', b.dataset[attr] === val));
+
+document.getElementById('panel').addEventListener('click', (e) => {
+  const b = e.target.closest('button'), a = api();
+  if (!b || !a) return;
+  if (b.dataset.state) { stopTalk(); a.setState(b.dataset.state); mark('state', b.dataset.state); mark('emotion', a.getEmotion()); }
+  if (b.dataset.emotion) { a.setEmotion(b.dataset.emotion); mark('emotion', b.dataset.emotion); }
+  if (b.dataset.symbol) a.triggerSymbol(b.dataset.symbol);
+});
+
+const amp = document.getElementById('amp'), intensity = document.getElementById('intensity');
+amp.addEventListener('input', () => { api()?.setAmplitude(+amp.value); document.getElementById('ampv').textContent = (+amp.value).toFixed(2); });
+intensity.addEventListener('input', () => { api()?.setIntensity(+intensity.value); document.getElementById('intv').textContent = (+intensity.value).toFixed(2); });
+
+// fake speech oscillator
+let talkTimer = null;
+function stopTalk() {
+  if (!talkTimer) return;
+  clearInterval(talkTimer); talkTimer = null;
+  api()?.setAmplitude(0);
+  document.getElementById('talk').classList.remove('active');
+}
+document.getElementById('talk').addEventListener('click', () => {
+  const a = api();
+  if (!a) return;
+  if (talkTimer) { stopTalk(); a.setState('idle'); mark('state', 'idle'); mark('emotion', a.getEmotion()); return; }
+  a.setState('speaking'); mark('state', 'speaking'); mark('emotion', a.getEmotion());
+  let ph = 0;
+  talkTimer = setInterval(() => {
+    ph += 0.13;
+    a.setAmplitude(Math.max(0, 0.45 + 0.4 * Math.sin(ph * 3.1) + 0.25 * Math.sin(ph * 7.7)));
+  }, 33);
+  document.getElementById('talk').classList.add('active');
+});
+
+// keyboard: 1-4 states · q ! . h symbols · space fake speech
+addEventListener('keydown', (e) => {
+  const a = api();
+  if (!a || e.repeat) return;
+  const states = { 1: 'idle', 2: 'listening', 3: 'thinking', 4: 'speaking' };
+  const syms = { q: '?', '!': '!', '.': '...', h: '♡' };
+  if (states[e.key]) { a.setState(states[e.key]); mark('state', states[e.key]); mark('emotion', a.getEmotion()); }
+  else if (syms[e.key]) a.triggerSymbol(syms[e.key]);
+  else if (e.key === ' ') { e.preventDefault(); document.getElementById('talk').click(); }
+});
+
+// live HUD: fps / dots / state from the engine, ws relay status
+setInterval(() => {
+  const a = api();
+  if (!a) return;
+  const s = a.getStats();
+  document.getElementById('fps').textContent = s.fps;
+  document.getElementById('dots').textContent = s.dots;
+  document.getElementById('st').textContent = `${s.state}/${s.emotion}`;
+}, 500);
+
+// ws relay: this panel connects to the bridge and forwards to the iframe,
+// so bridge messages show up even while the panel is the driver.
+const wsEl = document.getElementById('ws');
+const QS = new URLSearchParams(location.search);
+let wsUrl = QS.get('ws') || `${location.hostname || 'localhost'}:8765`;
+if (!/^wss?:\/\//.test(wsUrl)) {
+  if (!/:\d+$/.test(wsUrl)) wsUrl += ':8765';
+  wsUrl = `ws://${wsUrl}`;
+}
+let retry = 2000;
+(function connect() {
+  let ws;
+  try { ws = new WebSocket(wsUrl); } catch { wsEl.textContent = 'error'; wsEl.className = 'ws-error'; return; }
+  wsEl.textContent = 'connecting'; wsEl.className = 'ws-connecting';
+  ws.onopen = () => { retry = 2000; wsEl.textContent = 'connected'; wsEl.className = 'ws-connected'; };
+  ws.onmessage = (ev) => {
+    const a = api();
+    let m;
+    try { m = JSON.parse(ev.data); } catch { return; }
+    if (!a) return;
+    if (m.state !== undefined) { stopTalk(); a.setState(m.state); mark('state', m.state); mark('emotion', a.getEmotion()); }
+    if (m.emotion !== undefined) { a.setEmotion(m.emotion); mark('emotion', m.emotion); }
+    if (m.symbol !== undefined) a.triggerSymbol(m.symbol);
+    if (m.amplitude !== undefined) a.setAmplitude(+m.amplitude);
+    if (m.intensity !== undefined) a.setIntensity(+m.intensity);
+  };
+  ws.onclose = () => {
+    wsEl.textContent = 'disconnected'; wsEl.className = 'ws-disconnected';
+    setTimeout(connect, retry);
+    retry = Math.min(retry * 1.5, 30000);
+  };
+  ws.onerror = () => ws.close();
+})();
+</script>
+</body>
+</html>

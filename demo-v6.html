@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Chloe — Living Avatar</title>
+<style>
+  :root {
+    --bg: #05070c;
+    --panel: rgba(13, 17, 26, 0.72);
+    --border: rgba(140, 170, 210, 0.10);
+    --text: #c8d4e4;
+    --text-dim: rgba(200, 212, 228, 0.45);
+    --accent: #6b8cae;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+  body {
+    background: var(--bg);
+    background-image: radial-gradient(ellipse 90% 70% at 42% 45%, #0a0f1a 0%, #05070c 70%);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+    color: var(--text);
+    display: flex;
+  }
+
+  /* ── stage ── */
+  #stage { flex: 1; position: relative; min-width: 0; }
+  #avatar-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  #state-label {
+    position: absolute; left: 50%; bottom: 28px; transform: translateX(-50%);
+    font-size: 0.72rem; letter-spacing: 0.34em; text-transform: uppercase;
+    color: var(--text-dim);
+    background: rgba(0,0,0,0.35);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 7px 20px 7px 24px;
+    transition: color 0.8s ease, border-color 0.8s ease;
+    user-select: none; white-space: nowrap;
+  }
+
+  #brand {
+    position: absolute; top: 26px; left: 30px; user-select: none;
+  }
+  #brand h1 {
+    font-size: 1.05rem; font-weight: 300; letter-spacing: 0.55em;
+    text-transform: uppercase; color: var(--text);
+  }
+  #brand p {
+    margin-top: 5px; font-size: 0.64rem; letter-spacing: 0.18em;
+    text-transform: uppercase; color: var(--text-dim);
+  }
+
+  /* ── panel ── */
+  #panel {
+    width: 292px; flex-shrink: 0;
+    background: var(--panel);
+    backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    border-left: 1px solid var(--border);
+    padding: 28px 22px;
+    display: flex; flex-direction: column; gap: 22px;
+    overflow-y: auto;
+  }
+  .section-title {
+    font-size: 0.62rem; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--text-dim); margin-bottom: 10px;
+  }
+  .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  button {
+    font-family: inherit; font-size: 0.76rem; letter-spacing: 0.06em;
+    color: var(--text); background: rgba(255,255,255,0.035);
+    border: 1px solid var(--border); border-radius: 9px;
+    padding: 10px 6px; cursor: pointer;
+    transition: background 0.25s, border-color 0.25s, color 0.25s, box-shadow 0.25s;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:hover { background: rgba(255,255,255,0.07); }
+  button.active {
+    border-color: var(--accent);
+    color: #fff;
+    box-shadow: 0 0 14px -4px var(--accent), inset 0 0 10px -6px var(--accent);
+  }
+  button .key {
+    display: inline-block; margin-left: 6px; font-size: 0.6rem;
+    color: var(--text-dim); border: 1px solid var(--border);
+    border-radius: 4px; padding: 1px 5px; vertical-align: 1px;
+  }
+  .sym-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+  .sym-grid button { font-size: 1.05rem; padding: 9px 0; font-weight: 300; }
+
+  /* sliders */
+  .slider-row { display: flex; align-items: center; gap: 12px; }
+  .slider-row label { font-size: 0.68rem; color: var(--text-dim); width: 62px; flex-shrink: 0; }
+  .slider-row output { font-size: 0.68rem; width: 30px; text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  input[type="range"] {
+    flex: 1; appearance: none; -webkit-appearance: none; height: 3px; border-radius: 2px;
+    background: rgba(255,255,255,0.12); outline: none;
+    touch-action: pan-y; /* vertical swipes scroll the panel instead of dragging the slider */
+  }
+  input[type="range"]::-webkit-slider-thumb {
+    appearance: none; -webkit-appearance: none; width: 13px; height: 13px; border-radius: 50%;
+    background: var(--accent); border: 2px solid #0b1018; cursor: pointer;
+    transition: background 0.4s;
+  }
+  select {
+    width: 100%; font-family: inherit; font-size: 0.76rem; color: var(--text);
+    background: rgba(255,255,255,0.035); border: 1px solid var(--border);
+    border-radius: 9px; padding: 9px 10px; cursor: pointer; outline: none;
+  }
+  select option { background: #0d1119; }
+
+  /* stats */
+  #stats {
+    display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
+  }
+  .stat {
+    background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+    border-radius: 9px; padding: 9px 4px; text-align: center;
+  }
+  .stat b { display: block; font-size: 1.0rem; font-weight: 400; font-variant-numeric: tabular-nums; }
+  .stat span { font-size: 0.56rem; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-dim); }
+
+  #hints {
+    margin-top: auto; padding-top: 16px; border-top: 1px solid var(--border);
+    font-size: 0.62rem; line-height: 1.9; color: var(--text-dim); letter-spacing: 0.04em;
+  }
+  #hints kbd {
+    font-family: inherit; border: 1px solid var(--border); border-radius: 4px;
+    padding: 0 5px; margin-right: 2px; color: var(--text);
+  }
+
+  /* ── mobile ── */
+  @media (max-width: 720px) {
+    body { flex-direction: column; }
+    #stage { flex: 1; }
+    #panel {
+      width: 100%; max-height: 44vh; border-left: none;
+      border-top: 1px solid var(--border);
+      padding: 16px 16px 24px; gap: 14px;
+    }
+    #hints { display: none; }
+    #brand { top: 16px; left: 18px; }
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <canvas id="avatar-canvas"></canvas>
+  <div id="brand">
+    <h1>Chloe</h1>
+    <p>Living Avatar · v1.0</p>
+  </div>
+  <div id="state-label">idle</div>
+</div>
+
+<aside id="panel">
+  <div>
+    <div class="section-title">State</div>
+    <div class="btn-grid" id="state-buttons">
+      <button data-state="idle" class="active">Idle <span class="key">1</span></button>
+      <button data-state="listening">Listening <span class="key">2</span></button>
+      <button data-state="thinking">Thinking <span class="key">3</span></button>
+      <button data-state="excited">Excited <span class="key">4</span></button>
+      <button data-state="wandering">Wandering <span class="key">5</span></button>
+      <button data-state="transmitting">Transmit <span class="key">6</span></button>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title">Symbol</div>
+    <div class="sym-grid" id="symbol-buttons">
+      <button data-symbol="?" title="Q">?</button>
+      <button data-symbol="check" title="C">✓</button>
+      <button data-symbol="ellipsis" title="E">…</button>
+      <button data-symbol="!" title="X">!</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="section-title">Drive</div>
+    <div class="slider-row" style="margin-bottom: 10px;">
+      <label for="intensity">Thinking</label>
+      <input type="range" id="intensity" min="0" max="100" value="50">
+      <output id="intensity-out">.50</output>
+    </div>
+    <div class="slider-row" style="margin-bottom: 10px;">
+      <label for="audio">Audio</label>
+      <input type="range" id="audio" min="0" max="100" value="0">
+      <output id="audio-out">.00</output>
+    </div>
+    <button id="mic-btn" style="width:100%; margin-bottom:8px;">🎤 Use microphone <span class="key">M</span></button>
+    <button id="speak-btn" style="width:100%; margin-bottom:8px;">🗣 Speak words <span class="key">T</span></button>
+    <button id="speech-btn" style="width:100%;">▶ Simulate speech <span class="key">S</span></button>
+    <div id="mic-note" style="display:none; margin-top:8px; font-size:0.62rem; color:var(--text-dim); line-height:1.5;"></div>
+  </div>
+
+  <div>
+    <div class="section-title">Quality</div>
+    <select id="quality">
+      <option value="high">High — 120 dots</option>
+      <option value="medium">Medium — 80 dots</option>
+      <option value="low">Low — 50 dots (mobile)</option>
+    </select>
+  </div>
+
+  <div>
+    <div class="section-title">Telemetry</div>
+    <div id="stats">
+      <div class="stat"><b id="stat-fps">—</b><span>fps</span></div>
+      <div class="stat"><b id="stat-dots">—</b><span>dots</span></div>
+      <div class="stat"><b id="stat-lines">—</b><span>lines</span></div>
+    </div>
+  </div>
+
+  <div id="hints">
+    <kbd>1</kbd>–<kbd>6</kbd> states &nbsp; <kbd>Q</kbd><kbd>C</kbd><kbd>E</kbd><kbd>X</kbd> symbols<br>
+    <kbd>Space</kbd> transmit pulse &nbsp; <kbd>S</kbd> speech
+  </div>
+</aside>
+
+<script src="vendor/three.min.js"></script>
+<script src="shaders/chloe-shaders.js"></script>
+<script src="ChloeAvatar.js"></script>
+<script>
+(function () {
+  'use strict';
+
+  const isMobile = /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  const avatar = new ChloeAvatar(document.getElementById('avatar-canvas'), {
+    quality: isMobile ? 'low' : 'high',
+    cloudScale: isMobile ? 0.55 : 0.62,   // full app size — the iteration surface
+  });
+  window.avatar = avatar; // console access for tinkering
+  if (window.CHLOE_TUNING) avatar.setTuning(window.CHLOE_TUNING); // persisted taste (see TUNING.md)
+
+  const qualitySelect = document.getElementById('quality');
+  qualitySelect.value = isMobile ? 'low' : 'high';
+
+  /* ── state buttons ── */
+  const stateButtons = document.querySelectorAll('#state-buttons button');
+  const stateLabel = document.getElementById('state-label');
+
+  const STATE_ACCENTS = {
+    idle: '#6b8cae', listening: '#4fb3a1', thinking: '#5566c4',
+    excited: '#e8a045', wandering: '#5c8a8a', transmitting: '#4caf50',
+  };
+
+  function setState(name) {
+    avatar.setState(name, { intensity: intensitySlider.value / 100 });
+    syncUI(name);
+  }
+
+  function syncUI(name) {
+    stateButtons.forEach(b => b.classList.toggle('active', b.dataset.state === name));
+    stateLabel.textContent = name;
+    const accent = STATE_ACCENTS[name] || '#6b8cae';
+    document.documentElement.style.setProperty('--accent', accent);
+    stateLabel.style.color = accent;
+    stateLabel.style.borderColor = accent + '44';
+  }
+
+  stateButtons.forEach(b => b.addEventListener('click', () => setState(b.dataset.state)));
+
+  // transmitting auto-reverts inside the avatar — keep the UI in sync
+  setInterval(() => {
+    const s = avatar.getState();
+    if (stateLabel.textContent !== s) syncUI(s);
+  }, 250);
+
+  /* ── symbols ── */
+  document.querySelectorAll('#symbol-buttons button').forEach(b => {
+    b.addEventListener('click', () => avatar.showSymbol(b.dataset.symbol));
+  });
+
+  /* ── sliders ── */
+  const intensitySlider = document.getElementById('intensity');
+  const intensityOut = document.getElementById('intensity-out');
+  intensitySlider.addEventListener('input', () => {
+    const v = intensitySlider.value / 100;
+    avatar.setThinkingIntensity(v);
+    intensityOut.textContent = v.toFixed(2).slice(1);
+  });
+
+  const audioSlider = document.getElementById('audio');
+  const audioOut = document.getElementById('audio-out');
+  audioSlider.addEventListener('input', () => {
+    const v = audioSlider.value / 100;
+    avatar.setAudioLevel(v);
+    audioOut.textContent = v.toFixed(2).slice(1);
+  });
+
+  /* ── simulated speech — syllable-like envelope ── */
+  const speechBtn = document.getElementById('speech-btn');
+  let speechTimer = null, speechPhase = 0;
+  function toggleSpeech() {
+    if (speechTimer) {
+      clearInterval(speechTimer); speechTimer = null;
+      avatar.setAudioLevel(0);
+      audioSlider.value = 0; audioOut.textContent = '.00';
+      speechBtn.innerHTML = '▶ Simulate speech <span class="key">S</span>';
+      speechBtn.classList.remove('active');
+      return;
+    }
+    speechBtn.innerHTML = '■ Stop speech <span class="key">S</span>';
+    speechBtn.classList.add('active');
+    speechTimer = setInterval(() => {
+      speechPhase += 0.09;
+      // syllable rhythm: overlapping sines + random pauses
+      const syllable = Math.max(0, Math.sin(speechPhase * 7.3)) * (0.55 + 0.45 * Math.sin(speechPhase * 1.7));
+      const pause = Math.sin(speechPhase * 0.61) > -0.35 ? 1 : 0.05;
+      const v = Math.min(1, syllable * pause * (0.7 + Math.random() * 0.3));
+      avatar.setAudioLevel(v);
+      audioSlider.value = Math.round(v * 100);
+      audioOut.textContent = v.toFixed(2).slice(1);
+    }, 40);
+  }
+  speechBtn.addEventListener('click', toggleSpeech);
+
+  /* ── real microphone — the only honest way to judge reactivity ── */
+  const micBtn = document.getElementById('mic-btn');
+  const micNote = document.getElementById('mic-note');
+  let micCtx = null, micStream = null, micRAF = 0;
+  async function toggleMic() {
+    if (micCtx) {
+      cancelAnimationFrame(micRAF);
+      micStream.getTracks().forEach(t => t.stop());
+      micCtx.close(); micCtx = null; micStream = null;
+      avatar.setAudioLevel(0);
+      audioSlider.value = 0; audioOut.textContent = '.00';
+      micBtn.innerHTML = '🎤 Use microphone <span class="key">M</span>';
+      micBtn.classList.remove('active');
+      return;
+    }
+    try {
+      if (speechTimer) toggleSpeech();   // mic replaces simulation
+      micStream = await navigator.mediaDevices.getUserMedia({ audio: {
+        echoCancellation: true, noiseSuppression: true,
+      }});
+      micCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = micCtx.createMediaStreamSource(micStream);
+      const analyser = micCtx.createAnalyser();
+      analyser.fftSize = 512;
+      src.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      let smooth = 0;
+      const NOISE_FLOOR = 0.010, FULL = 0.18;   // RMS window for speech
+      const pump = () => {
+        micRAF = requestAnimationFrame(pump);
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (let k = 0; k < buf.length; k++) sum += buf[k] * buf[k];
+        const rms = Math.sqrt(sum / buf.length);
+        const v = Math.max(0, Math.min(1, (rms - NOISE_FLOOR) / (FULL - NOISE_FLOOR)));
+        smooth += (v - smooth) * (v > smooth ? 0.5 : 0.12);  // fast attack, slow release
+        avatar.setAudioLevel(smooth);
+        audioSlider.value = Math.round(smooth * 100);
+        audioOut.textContent = smooth.toFixed(2).slice(1);
+      };
+      pump();
+      micBtn.innerHTML = '■ Stop microphone <span class="key">M</span>';
+      micBtn.classList.add('active');
+      micNote.style.display = 'none';
+    } catch (err) {
+      micNote.style.display = 'block';
+      micNote.textContent = 'Microphone unavailable here (' + err.name +
+        '). If this page is embedded/sandboxed, open the demo on localhost or from disk instead.';
+    }
+  }
+  micBtn.addEventListener('click', toggleMic);
+
+  /* ── spoken words — text rises from the field, dots react per word ── */
+  const speakBtn = document.getElementById('speak-btn');
+  const SAMPLES = [
+    'I am here with you — listening, thinking, learning to be seen',
+    'every dot you watch is deciding something right now',
+    'ask me anything and watch what I do with it',
+  ];
+  let sampleIdx = 0;
+  function speakSample() {
+    const text = SAMPLES[sampleIdx++ % SAMPLES.length];
+    avatar.speak(text);
+    // drive the physics with a matching audio envelope while words show
+    if (!speechTimer && !micCtx) {
+      toggleSpeech();
+      const est = text.split(/\s+/).reduce((s, w) => s + Math.max(240, w.length * 58) + 70, 400);
+      setTimeout(() => { if (speechTimer) toggleSpeech(); }, est);
+    }
+  }
+  speakBtn.addEventListener('click', speakSample);
+
+  /* ── quality ── */
+  qualitySelect.addEventListener('change', () => avatar.setQuality(qualitySelect.value));
+
+  /* ── telemetry ── */
+  const elFps = document.getElementById('stat-fps');
+  const elDots = document.getElementById('stat-dots');
+  const elLines = document.getElementById('stat-lines');
+  setInterval(() => {
+    const s = avatar.getStats();
+    elFps.textContent = s.fps;
+    elDots.textContent = s.dots;
+    elLines.textContent = s.lines;
+  }, 500);
+
+  /* ── keyboard ── */
+  const KEYMAP = {
+    '1': () => setState('idle'),
+    '2': () => setState('listening'),
+    '3': () => setState('thinking'),
+    '4': () => setState('excited'),
+    '5': () => setState('wandering'),
+    '6': () => setState('transmitting'),
+    'q': () => avatar.showSymbol('?'),
+    'c': () => avatar.showSymbol('check'),
+    'e': () => avatar.showSymbol('ellipsis'),
+    'x': () => avatar.showSymbol('!'),
+    's': toggleSpeech,
+    'm': toggleMic,
+    't': speakSample,
+    ' ': () => avatar.pulse('transmit'),
+  };
+  window.addEventListener('keydown', (ev) => {
+    if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'SELECT') return;
+    const fn = KEYMAP[ev.key.toLowerCase()];
+    if (fn) { ev.preventDefault(); fn(); }
+  });
+})();
+</script>
+</body>
+</html>

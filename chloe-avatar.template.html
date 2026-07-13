@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#05060f" />
+<title>Chloe</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #05060f; overflow: hidden; }
+  #chloe { position: fixed; inset: 0; }
+  #debug {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    display: none; flex-wrap: wrap; gap: 6px; padding: 10px calc(10px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) 10px;
+    font: 12px system-ui, sans-serif; background: rgba(5,6,15,.55); backdrop-filter: blur(6px);
+  }
+  #debug.on { display: flex; }
+  #debug button {
+    background: #1e1b4b; color: #c7d2fe; border: 1px solid #4338ca; border-radius: 8px;
+    padding: 6px 10px; font: inherit;
+  }
+  #debug button.active { background: #4338ca; color: #fff; }
+  #debug input[type=range] { width: 120px; align-self: center; }
+  #debug .lbl { color: #818cf8; align-self: center; margin-left: 6px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js",
+    "@theatre/core": "https://esm.sh/@theatre/core@0.7.2"
+  }
+}
+</script>
+</head>
+<body>
+<div id="chloe"></div>
+<div id="debug">
+  <span class="lbl">state</span>
+  <button data-state="idle" class="active">idle</button>
+  <button data-state="thinking">thinking</button>
+  <button data-state="speaking">speaking</button>
+  <button data-state="listening">listening</button>
+  <span class="lbl">emotion</span>
+  <button data-emotion="neutral" class="active">neutral</button>
+  <button data-emotion="happy">happy</button>
+  <button data-emotion="thinking">thinking</button>
+  <button data-emotion="listening">listening</button>
+  <button data-emotion="speaking">speaking</button>
+  <button data-emotion="alert">alert</button>
+  <span class="lbl">symbol</span>
+  <button data-symbol="?">?</button>
+  <button data-symbol="!">!</button>
+  <button data-symbol="...">…</button>
+  <button data-symbol="♡">♡</button>
+  <span class="lbl">amp</span>
+  <input id="amp" type="range" min="0" max="1" step="0.01" value="0" />
+  <span class="lbl">intensity</span>
+  <input id="intensity" type="range" min="0" max="1" step="0.01" value="0.5" />
+  <button id="talk">fake speech</button>
+</div>
+<script type="module">
+/*__CORE__*/
+
+// ---------------------------------------------------------------------------
+// Page glue: Theatre.js is optional — if the CDN is unreachable (offline
+// phone), the core falls back to its built-in timing shim.
+// ---------------------------------------------------------------------------
+let theatre = null;
+try {
+  theatre = await import('@theatre/core');
+} catch (e) {
+  console.warn('[chloe-avatar] @theatre/core unavailable, running on shim:', e);
+}
+
+const QS = new URLSearchParams(location.search);
+const DEBUG = QS.has('debug');
+
+// ?transparent → overlay mode: see-through background, clicks pass through
+// (embed over the fleet dashboard / phone shell)
+if (QS.has('transparent')) {
+  document.documentElement.style.background = 'transparent';
+  document.body.style.background = 'transparent';
+  document.getElementById('chloe').style.pointerEvents = 'none';
+}
+
+const avatar = createChloeAvatar(document.getElementById('chloe'), {
+  theatre,
+  emotion: 'neutral',
+  particleCount: QS.has('dots') ? +QS.get('dots') | 0
+    : (matchMedia('(max-width: 767px)').matches ? 150 : 300),
+  preserveDrawingBuffer: DEBUG, // allows canvas capture in the debug harness
+});
+window.avatar = avatar; // JS API: avatar.setState(state, {amplitude, emotion}), .showSymbol(str), ...
+
+// ---------------------------------------------------------------------------
+// window.ChloeAvatar — the fleet control surface (spec 2026-07-06).
+// States carry their own color signature: setState recolors to the matching
+// emotion unless a sticky emotion was set via setEmotion (clear it by
+// setting 'neutral' or 'auto').
+// ---------------------------------------------------------------------------
+const STATE_EMOTION = { idle: 'neutral', listening: 'listening', thinking: 'thinking', speaking: 'speaking' };
+let stickyEmotion = null;
+window.ChloeAvatar = {
+  setState(s) {
+    avatar.setState(s);
+    const e = stickyEmotion ?? STATE_EMOTION[s];
+    if (e) avatar.setEmotion(e);
+  },
+  setEmotion(e) {
+    if (e === 'auto' || e === 'neutral') {
+      stickyEmotion = null;
+      avatar.setEmotion(e === 'neutral' ? 'neutral' : (STATE_EMOTION[avatar.getState()] ?? 'neutral'));
+    } else {
+      stickyEmotion = e;
+      avatar.setEmotion(e);
+    }
+  },
+  triggerSymbol(str) { avatar.showSymbol(str); },
+  setAmplitude(a) { avatar.setAmplitude(a); },
+  setIntensity(v) { avatar.setIntensity(v); },
+  getState: () => avatar.getState(),
+  getEmotion: () => avatar.getEmotion(),
+  getStats: () => avatar.getStats(),
+  wsStatus: 'off',
+  avatar, // escape hatch to the raw engine
+};
+
+// Shared message schema (ws + postMessage): {"state":..} {"emotion":..}
+// {"symbol":..} {"amplitude":..} {"intensity":..} — any combination of keys.
+function applyMessage(m) {
+  if (!m || typeof m !== 'object') return;
+  if (m.state !== undefined) window.ChloeAvatar.setState(m.state);
+  if (m.emotion !== undefined) window.ChloeAvatar.setEmotion(m.emotion);
+  if (m.symbol !== undefined) window.ChloeAvatar.triggerSymbol(m.symbol);
+  if (m.amplitude !== undefined) window.ChloeAvatar.setAmplitude(+m.amplitude);
+  if (m.intensity !== undefined) window.ChloeAvatar.setIntensity(+m.intensity);
+}
+
+// postMessage control — lets a host page (e.g. the mobile PWA) drive an
+// embedded iframe even cross-origin:
+//   iframe.contentWindow.postMessage({ chloe: { state: 'thinking' } }, '*')
+addEventListener('message', (ev) => applyMessage(ev.data && ev.data.chloe));
+
+// ---------------------------------------------------------------------------
+// WebSocket control channel. Default ws://<page-host>:8765 (localhost on
+// file://); on https pages the default is wss://<page-host>/avatar-ws (the
+// nginx bridge proxy) because browsers block plain ws: from https origins.
+// Override: ?ws=host[:port] or ?ws=ws://host:port/path. Disable: ?nows.
+// ---------------------------------------------------------------------------
+if (!QS.has('nows')) {
+  let wsUrl = QS.get('ws') ||
+    (location.protocol === 'https:'
+      ? `wss://${location.host}/avatar-ws`
+      : `${location.hostname || 'localhost'}:8765`);
+  if (!/^wss?:\/\//.test(wsUrl)) {
+    if (!/:\d+$/.test(wsUrl)) wsUrl += ':8765';
+    wsUrl = `ws://${wsUrl}`;
+  }
+  let retry = 2000;
+  const setWs = (st) => {
+    window.ChloeAvatar.wsStatus = st;
+    dispatchEvent(new CustomEvent('chloe-ws', { detail: st }));
+  };
+  (function connect() {
+    let ws;
+    try { ws = new WebSocket(wsUrl); } catch { setWs('error'); return; }
+    setWs('connecting');
+    ws.onopen = () => { retry = 2000; setWs('connected'); };
+    ws.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      applyMessage(m);
+    };
+    ws.onclose = () => {
+      setWs('disconnected');
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 1.5, 30000);
+    };
+    ws.onerror = () => ws.close();
+  })();
+}
+
+// --- debug panel (open with ?debug) ---
+if (DEBUG) {
+  const panel = document.getElementById('debug');
+  panel.classList.add('on');
+  const mark = (attr, val) => panel.querySelectorAll(`[data-${attr}]`).forEach(
+    (b) => b.classList.toggle('active', b.dataset[attr] === val));
+  panel.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.state) { ChloeAvatar.setState(b.dataset.state); mark('state', b.dataset.state); mark('emotion', avatar.getEmotion()); }
+    if (b.dataset.emotion) { ChloeAvatar.setEmotion(b.dataset.emotion); mark('emotion', b.dataset.emotion); }
+    if (b.dataset.symbol) ChloeAvatar.triggerSymbol(b.dataset.symbol);
+  });
+  document.getElementById('amp').addEventListener('input', (e) => ChloeAvatar.setAmplitude(+e.target.value));
+  document.getElementById('intensity').addEventListener('input', (e) => ChloeAvatar.setIntensity(+e.target.value));
+  let talkTimer = null;
+  document.getElementById('talk').addEventListener('click', (e) => {
+    if (talkTimer) {
+      clearInterval(talkTimer); talkTimer = null;
+      ChloeAvatar.setAmplitude(0); ChloeAvatar.setState('idle'); mark('state', 'idle');
+      e.target.classList.remove('active');
+    } else {
+      ChloeAvatar.setState('speaking'); mark('state', 'speaking');
+      let ph = 0;
+      talkTimer = setInterval(() => {
+        ph += 0.13;
+        ChloeAvatar.setAmplitude(Math.max(0, 0.45 + 0.4 * Math.sin(ph * 3.1) + 0.25 * Math.sin(ph * 7.7)));
+      }, 33);
+      e.target.classList.add('active');
+    }
+    mark('emotion', avatar.getEmotion());
+  });
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#05060f" />
+<title>Chloe</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #05060f; overflow: hidden; }
+  #chloe { position: fixed; inset: 0; }
+  #debug {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
+    display: none; flex-wrap: wrap; gap: 6px; padding: 10px calc(10px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) 10px;
+    font: 12px system-ui, sans-serif; background: rgba(5,6,15,.55); backdrop-filter: blur(6px);
+  }
+  #debug.on { display: flex; }
+  #debug button {
+    background: #1e1b4b; color: #c7d2fe; border: 1px solid #4338ca; border-radius: 8px;
+    padding: 6px 10px; font: inherit;
+  }
+  #debug button.active { background: #4338ca; color: #fff; }
+  #debug input[type=range] { width: 120px; align-self: center; }
+  #debug .lbl { color: #818cf8; align-self: center; margin-left: 6px; }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js"
+  }
+}
+</script>
+</head>
+<body>
+<div id="chloe"></div>
+<div id="debug">
+  <span class="lbl">state</span>
+  <button data-state="idle" class="active">idle</button>
+  <button data-state="thinking">thinking</button>
+  <button data-state="speaking">speaking</button>
+  <button data-state="listening">listening</button>
+  <span class="lbl">emotion</span>
+  <button data-emotion="neutral" class="active">neutral</button>
+  <button data-emotion="happy">happy</button>
+  <button data-emotion="thinking">thinking</button>
+  <button data-emotion="listening">listening</button>
+  <button data-emotion="speaking">speaking</button>
+  <button data-emotion="alert">alert</button>
+  <span class="lbl">symbol</span>
+  <button data-symbol="?">?</button>
+  <button data-symbol="!">!</button>
+  <button data-symbol="...">…</button>
+  <button data-symbol="♡">♡</button>
+  <span class="lbl">amp</span>
+  <input id="amp" type="range" min="0" max="1" step="0.01" value="0" />
+  <span class="lbl">intensity</span>
+  <input id="intensity" type="range" min="0" max="1" step="0.01" value="0.5" />
+  <button id="talk">fake speech</button>
+</div>
+<script type="module">
+/**
+ * Chloe Avatar — organic dot-cloud with proximity lines (synaptic look).
+ *
+ * NOT an orb, NOT a face. A cloud of randomized dots with lines drawn
+ * between nearby dots, animated like neurons firing.
+ *
+ * Rendering technique adapted from the MIT-licensed three.js example
+ * "webgl_buffergeometry_drawrange" (mrdoob/three.js): preallocated
+ * LineSegments buffer + per-frame proximity pass + setDrawRange.
+ *
+ * States: idle | thinking | speaking | listening
+ * Emotions: calm | curious | alert | warm
+ * Symbols: any single glyph (e.g. '?' query, '!' alert) — dots coalesce
+ * into the glyph, hold, then dissolve back.
+ *
+ * Theatre.js (@theatre/core) drives the ambient keyframe loops (breath /
+ * shimmer) and the state-transition easing curve via a hand-authored
+ * project state. If Theatre is unavailable (offline phone), a built-in
+ * oscillator/tween shim keeps the avatar fully functional.
+ *
+ * API (returned object):
+ *   avatar.setState(state, { amplitude?, emotion? })
+ *   avatar.setAmplitude(a)        // 0..1, call freely at audio rate
+ *   avatar.setIntensity(v)        // 0..1 overall activity (0.5 = baseline)
+ *   avatar.setEmotion(emotion)
+ *   avatar.showSymbol(str)        // '?', '!', '...', '♡' — multi-char ok
+ *   avatar.getState() / avatar.getEmotion() / avatar.getStats()
+ *   avatar.dispose()
+ */
+
+import * as THREE from 'three';
+
+export const AVATAR_STATES = ['idle', 'thinking', 'speaking', 'listening'];
+
+const EMOTION_PALETTES = {
+  //           dots base   dots tip    lines       sparks
+  // Chloe emotion set (fleet spec 2026-07-06): anchor hexes in the tip.
+  neutral:   { base: 0x5570e0, tip: 0xa855f7, line: 0x6b8cff, spark: 0x9db4ff },
+  happy:     { base: 0xd99a00, tip: 0xffd700, line: 0xf0b400, spark: 0xffe680 },
+  thinking:  { base: 0xcc7000, tip: 0xffb347, line: 0xff8c00, spark: 0xffd9a0 },
+  listening: { base: 0x0090c0, tip: 0x00c9ff, line: 0x00aee0, spark: 0x8ae8ff },
+  speaking:  { base: 0x8fa3e8, tip: 0xfff8f0, line: 0xbcc8f0, spark: 0xffffff },
+  alert:     { base: 0xcc2222, tip: 0xff4444, line: 0xe03333, spark: 0xff9999 },
+  // legacy palettes (2026-07-05 build; ChloeAvatar.tsx defaults)
+  calm:    { base: 0x3730a3, tip: 0x6366f1, line: 0x4f46e5, spark: 0x818cf8 },
+  curious: { base: 0x0284c7, tip: 0x22d3ee, line: 0x0ea5e9, spark: 0x67e8f9 },
+  warm:    { base: 0xe11d48, tip: 0xff9e80, line: 0xfb7185, spark: 0xfda4af },
+};
+export const AVATAR_EMOTIONS = Object.keys(EMOTION_PALETTES);
+
+// Per-state behaviour targets. Values are blended by transition weights.
+const STATE_DEFS = {
+  idle:      { spread: 1.00, drift: 0.30, wobble: 0.16, jitter: 0.015, lineDist: 1.05, lineOpacity: 0.30, sparkRate: 0.15, sizeMul: 1.00, breathAmt: 0.18, rotSpeed: 0.050, cluster: 0.0 },
+  thinking:  { spread: 1.00, drift: 0.85, wobble: 0.30, jitter: 0.100, lineDist: 1.15, lineOpacity: 0.50, sparkRate: 7.00, sizeMul: 1.02, breathAmt: 0.10, rotSpeed: 0.090, cluster: 0.38 },
+  speaking:  { spread: 1.00, drift: 0.45, wobble: 0.20, jitter: 0.030, lineDist: 1.10, lineOpacity: 0.34, sparkRate: 0.80, sizeMul: 1.00, breathAmt: 0.05, rotSpeed: 0.060, cluster: 0.0 },
+  listening: { spread: 0.72, drift: 0.12, wobble: 0.07, jitter: 0.006, lineDist: 1.30, lineOpacity: 0.42, sparkRate: 0.05, sizeMul: 0.95, breathAmt: 0.08, rotSpeed: 0.028, cluster: 0.0 },
+};
+const PARAM_KEYS = Object.keys(STATE_DEFS.idle);
+
+// ---------------------------------------------------------------------------
+// Theatre.js project state (hand-authored; definitionVersion 0.4.0 export
+// format). Two sheets: "Ambient" (looping breath/shimmer oscillators) and
+// "Transition" (0→1 eased progress used to crossfade state weights).
+// ---------------------------------------------------------------------------
+function kf(id, position, value) {
+  return { id, position, connectedRight: true, handles: [0.5, 1, 0.5, 0], type: 'bezier', value };
+}
+const THEATRE_STATE = {
+  sheetsById: {
+    Ambient: {
+      staticOverrides: { byObject: {} },
+      sequence: {
+        subUnitsPerUnit: 30, length: 4, type: 'PositionalSequence',
+        tracksByObject: {
+          loops: {
+            trackData: {
+              tBreath:  { type: 'BasicKeyframedTrack', __debugName: 'loops:breath',  keyframes: [kf('b0', 0, 0), kf('b1', 2, 1), kf('b2', 4, 0)] },
+              tShimmer: { type: 'BasicKeyframedTrack', __debugName: 'loops:shimmer', keyframes: [kf('s0', 0, 0.2), kf('s1', 0.9, 1), kf('s2', 1.8, 0.35), kf('s3', 2.9, 0.9), kf('s4', 4, 0.2)] },
+            },
+            trackIdByPropPath: { '["breath"]': 'tBreath', '["shimmer"]': 'tShimmer' },
+          },
+        },
+      },
+    },
+    Transition: {
+      staticOverrides: { byObject: {} },
+      sequence: {
+        subUnitsPerUnit: 30, length: 1, type: 'PositionalSequence',
+        tracksByObject: {
+          xf: {
+            trackData: {
+              tProg: { type: 'BasicKeyframedTrack', __debugName: 'xf:progress', keyframes: [kf('p0', 0, 0), kf('p1', 0.8, 1)] },
+            },
+            trackIdByPropPath: { '["progress"]': 'tProg' },
+          },
+        },
+      },
+    },
+  },
+  definitionVersion: '0.4.0',
+  revisionHistory: [],
+};
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+const easeInOutCubic = (p) => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+
+export function createChloeAvatar(container, opts = {}) {
+  const N = opts.particleCount ?? 200;
+  const RADIUS = 2.1;
+  const MAX_NB = 6;                 // tracked neighbours per dot (for sparks)
+  const MAX_CONN_PER = 4;           // drawn line connections per dot
+  const SEG_CAP = N * MAX_CONN_PER; // preallocated line segments
+  const SPARK_CAP = 96;
+
+  const reducedMotion =
+    typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // --- renderer / scene -----------------------------------------------------
+  const scene = new THREE.Scene();
+  const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 100);
+  camera.position.z = 7;
+  const renderer = new THREE.WebGLRenderer({
+    antialias: true, alpha: true, powerPreference: 'high-performance',
+    preserveDrawingBuffer: !!opts.preserveDrawingBuffer,
+  });
+  renderer.setPixelRatio(Math.min(devicePixelRatio || 1, 1.75));
+  renderer.domElement.style.cssText = 'display:block;width:100%;height:100%;';
+  container.appendChild(renderer.domElement);
+  const group = new THREE.Group();
+  scene.add(group);
+
+  // --- particle data ---------------------------------------------------------
+  const home = new Float32Array(N * 3);       // organic rest positions
+  const pos = new Float32Array(N * 3);        // current positions
+  const flash = new Float32Array(N);          // neuron-fire flash 0..1
+  const pMix = new Float32Array(N);           // palette gradient factor
+  const pSize = new Float32Array(N);          // base size variation
+  const pFreq = new Float32Array(N * 3);      // wander frequencies
+  const pPhase = new Float32Array(N * 3);     // wander phases
+  const clusterId = new Int8Array(N);         // thinking-state cluster (-1 none)
+
+  for (let i = 0; i < N; i++) {
+    // random direction * center-weighted radius, slightly taller than wide
+    // (portrait) — organic blob, no geometric arrangement
+    const u = Math.random() * 2 - 1;
+    const th = Math.random() * Math.PI * 2;
+    const s = Math.sqrt(1 - u * u);
+    const r = Math.pow(Math.random(), 0.42) * RADIUS;
+    home[i * 3] = s * Math.cos(th) * r * 0.92;
+    home[i * 3 + 1] = u * r * 1.12;
+    home[i * 3 + 2] = s * Math.sin(th) * r * 0.85;
+    pos.set(home.subarray(i * 3, i * 3 + 3), i * 3);
+    pMix[i] = Math.random();
+    pSize[i] = 0.7 + Math.random() * 0.6;
+    for (let a = 0; a < 3; a++) {
+      pFreq[i * 3 + a] = 0.4 + Math.random() * 0.8;
+      pPhase[i * 3 + a] = Math.random() * Math.PI * 2;
+    }
+    clusterId[i] = Math.random() < 0.6 ? (Math.random() * 3) | 0 : -1;
+  }
+
+  // --- dots (custom point shader: per-dot size + color, soft round sprite) ---
+  const dotGeo = new THREE.BufferGeometry();
+  const dotCol = new Float32Array(N * 3);
+  const dotSize = new Float32Array(N);
+  dotGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  dotGeo.setAttribute('aColor', new THREE.BufferAttribute(dotCol, 3).setUsage(THREE.DynamicDrawUsage));
+  dotGeo.setAttribute('aSize', new THREE.BufferAttribute(dotSize, 1).setUsage(THREE.DynamicDrawUsage));
+  const makePointMaterial = (softness) => new THREE.ShaderMaterial({
+    transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    uniforms: { uPixelScale: { value: 300 }, uGlobal: { value: 1 } },
+    vertexShader: `
+      attribute float aSize; attribute vec3 aColor;
+      uniform float uPixelScale; varying vec3 vColor;
+      void main() {
+        vColor = aColor;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = aSize * uPixelScale / -mv.z;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      uniform float uGlobal; varying vec3 vColor;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float a = smoothstep(0.5, ${softness}, d) * uGlobal;
+        gl_FragColor = vec4(vColor * a, a);
+      }`,
+  });
+  const dotMat = makePointMaterial('0.10');
+  const dots = new THREE.Points(dotGeo, dotMat);
+  group.add(dots);
+
+  // --- proximity lines (preallocated, drawRange trimmed per frame) -----------
+  const linePos = new Float32Array(SEG_CAP * 2 * 3);
+  const lineCol = new Float32Array(SEG_CAP * 2 * 3);
+  const lineGeo = new THREE.BufferGeometry();
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(linePos, 3).setUsage(THREE.DynamicDrawUsage));
+  lineGeo.setAttribute('color', new THREE.BufferAttribute(lineCol, 3).setUsage(THREE.DynamicDrawUsage));
+  const lineMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending });
+  const lines = new THREE.LineSegments(lineGeo, lineMat);
+  group.add(lines);
+
+  // per-pair temporal smoothing: drawn opacity eases toward the proximity
+  // target, so links fade in/out instead of popping when a pair crosses the
+  // distance threshold or loses its connection slot to a nearer neighbour
+  const pairAlpha = new Float32Array(N * N);
+  const pairTarget = new Float32Array(N * N);
+  const pairLive = new Uint8Array(N * N);
+  const livePairs = [];
+
+  // --- sparks (electrical impulses travelling along connections) -------------
+  const sparkPos = new Float32Array(SPARK_CAP * 3);
+  const sparkColArr = new Float32Array(SPARK_CAP * 3);
+  const sparkSizeArr = new Float32Array(SPARK_CAP);
+  const sparkGeo = new THREE.BufferGeometry();
+  sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3).setUsage(THREE.DynamicDrawUsage));
+  sparkGeo.setAttribute('aColor', new THREE.BufferAttribute(sparkColArr, 3).setUsage(THREE.DynamicDrawUsage));
+  sparkGeo.setAttribute('aSize', new THREE.BufferAttribute(sparkSizeArr, 1).setUsage(THREE.DynamicDrawUsage));
+  const sparkMat = makePointMaterial('0.05');
+  const sparks = new THREE.Points(sparkGeo, sparkMat);
+  group.add(sparks);
+  const spA = new Int16Array(SPARK_CAP), spB = new Int16Array(SPARK_CAP);
+  const spT = new Float32Array(SPARK_CAP), spSpeed = new Float32Array(SPARK_CAP);
+  const spHops = new Int8Array(SPARK_CAP);
+  let sparkCount = 0;
+
+  // neighbour lists rebuilt during the line pass (feed spark propagation)
+  const nbIdx = new Int16Array(N * MAX_NB);
+  const nbCount = new Uint8Array(N);
+
+  // --- palettes ---------------------------------------------------------------
+  const cur = { base: new THREE.Color(), tip: new THREE.Color(), line: new THREE.Color(), spark: new THREE.Color() };
+  const tgt = { base: new THREE.Color(), tip: new THREE.Color(), line: new THREE.Color(), spark: new THREE.Color() };
+  let emotion = opts.emotion && EMOTION_PALETTES[opts.emotion] ? opts.emotion : 'calm';
+  for (const k in cur) { cur[k].setHex(EMOTION_PALETTES[emotion][k]); tgt[k].copy(cur[k]); }
+
+  // --- state machine ----------------------------------------------------------
+  let state = AVATAR_STATES.includes(opts.state) ? opts.state : 'idle';
+  const weights = { idle: 0, thinking: 0, speaking: 0, listening: 0 };
+  weights[state] = 1;
+  let xfFrom = null; // snapshot of weights when a transition starts
+  let amplitude = 0;
+  let intensity = 0.5; // 0..1 overall activity; 0.5 = the tuned baseline
+
+  // --- oscillators (Theatre-driven, shim fallback) ----------------------------
+  const osc = { breath: 0.5, shimmer: 0.5 };
+  const dbgXf = { calls: 0, lastP: -1, playCalls: 0, seqPos: () => -1 };
+  let theatreDriver = null;   // { playTransition(), tick(ms) } when Theatre is active
+  let shimXf = null;          // { t } manual transition clock when shimmed
+  const XF_LEN = 0.8;
+
+  function onTransitionProgress(p) {
+    if (!xfFrom) return;
+    for (const s of AVATAR_STATES) weights[s] = xfFrom[s] + ((s === state ? 1 : 0) - xfFrom[s]) * clamp01(p);
+    if (p >= 1) xfFrom = null;
+  }
+  function beginTransition() {
+    xfFrom = { ...weights };
+    if (theatreDriver) theatreDriver.playTransition();
+    else shimXf = { t: 0 };
+  }
+
+  if (opts.theatre) {
+    try {
+      // esm.sh serves @theatre/core with the API under `.default` (CJS interop)
+      const t = typeof opts.theatre.getProject === 'function' ? opts.theatre : opts.theatre.default;
+      const projectName = opts.projectName ?? 'ChloeAvatar';
+      const project = t.getProject(projectName, { state: THEATRE_STATE });
+      // Single clock: Theatre ticks from the avatar's own step loop, so
+      // sequences pause/resume exactly with the render loop.
+      const rafDriver = t.createRafDriver({ name: 'chloe-avatar' });
+      const ambient = project.sheet('Ambient');
+      const loops = ambient.object('loops', { breath: t.types.number(0, { range: [0, 1] }), shimmer: t.types.number(0.5, { range: [0, 1] }) });
+      loops.onValuesChange((v) => { osc.breath = v.breath; osc.shimmer = v.shimmer; }, rafDriver);
+      const trans = project.sheet('Transition');
+      const xf = trans.object('xf', { progress: t.types.number(0, { range: [0, 1] }) });
+      xf.onValuesChange((v) => { dbgXf.calls++; dbgXf.lastP = v.progress; onTransitionProgress(v.progress); }, rafDriver);
+      project.ready.then(() => {
+        if (!reducedMotion) ambient.sequence.play({ iterationCount: Infinity, range: [0, 4], rafDriver });
+      });
+      dbgXf.seqPos = () => trans.sequence.position;
+      theatreDriver = {
+        playTransition() {
+          dbgXf.playCalls++;
+          trans.sequence.position = 0;
+          trans.sequence.play({ range: [0, XF_LEN], rafDriver }).catch((e) => console.warn('[chloe-avatar] transition play rejected:', e));
+        },
+        tick(ms) { rafDriver.tick(ms); },
+      };
+    } catch (e) {
+      console.warn('[chloe-avatar] Theatre.js init failed, using built-in timing shim:', e);
+      theatreDriver = null;
+    }
+  }
+
+  // --- symbol formation --------------------------------------------------------
+  // phases: 0 none | 1 forming | 2 holding | 3 releasing
+  let symPhase = 0, symClock = 0;
+  const symTarget = new Float32Array(N * 3);
+  const symDelay = new Float32Array(N);
+  const symDur = new Float32Array(N);
+  const symStart = new Float32Array(N * 3);
+  const SYM_FORM = 1.05, SYM_HOLD = 1.15, SYM_RELEASE = 0.9;
+
+  function sampleGlyph(str) {
+    const S = 200;
+    const c = document.createElement('canvas');
+    c.width = c.height = S;
+    const ctx = c.getContext('2d', { willReadFrequently: true });
+    ctx.fillStyle = '#fff';
+    const font = (px) => `bold ${px}px system-ui, "Segoe UI", sans-serif`;
+    let fs = S * 0.82;
+    ctx.font = font(fs);
+    // multi-char symbols ('...', '<3') shrink to fit the stage width
+    const w = ctx.measureText(str).width;
+    if (w > S * 0.92) { fs *= (S * 0.92) / w; ctx.font = font(fs); }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(str, S / 2, S / 2 + S * 0.03);
+    const img = ctx.getImageData(0, 0, S, S).data;
+    const pts = [];
+    for (let y = 0; y < S; y += 3) for (let x = 0; x < S; x += 3) {
+      if (img[(y * S + x) * 4 + 3] > 128) pts.push([x, y]);
+    }
+    return pts;
+  }
+
+  function showSymbol(str) {
+    const px = sampleGlyph(str);
+    if (!px.length) return;
+    // shuffled pixel targets, greedy-ish: each dot takes a random glyph pixel
+    for (let i = px.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0;
+      const t2 = px[i]; px[i] = px[j]; px[j] = t2;
+    }
+    // size the glyph to the visible frustum, not fixed world units
+    const visH = 2 * camera.position.z * Math.tan((camera.fov * Math.PI) / 360);
+    const glyphWorld = Math.min(visH * camera.aspect, visH) * 0.78;
+    const scale = glyphWorld / 200;
+    for (let i = 0; i < N; i++) {
+      const [gx, gy] = px[i % px.length];
+      symTarget[i * 3] = (gx - 100) * scale + (Math.random() - 0.5) * 0.03;
+      symTarget[i * 3 + 1] = -(gy - 100) * scale + (Math.random() - 0.5) * 0.03;
+      symTarget[i * 3 + 2] = (Math.random() - 0.5) * 0.1;
+      symDelay[i] = Math.random() * 0.3;
+      symDur[i] = 0.55 + Math.random() * 0.4;
+      symStart.set(pos.subarray(i * 3, i * 3 + 3), i * 3);
+    }
+    symPhase = 1; symClock = 0;
+  }
+
+  // --- thinking clusters --------------------------------------------------------
+  const clusterCenter = new Float32Array(9);
+  let clusterTimer = 0, clusterPhase = Math.random();
+  function reseedClusters() {
+    for (let c = 0; c < 3; c++) {
+      const i = (Math.random() * N) | 0;
+      clusterCenter.set(home.subarray(i * 3, i * 3 + 3), c * 3);
+    }
+  }
+  reseedClusters();
+
+  // --- param blending -------------------------------------------------------------
+  const P = {};
+  function blendParams() {
+    for (const k of PARAM_KEYS) {
+      let v = 0;
+      for (const s of AVATAR_STATES) v += STATE_DEFS[s][k] * weights[s];
+      P[k] = v;
+    }
+    // overall activity level: 0.5 maps to 1× (the tuned baseline)
+    const iF = 0.5 + intensity;
+    P.drift *= iF; P.wobble *= iF; P.jitter *= iF;
+    P.sparkRate *= iF; P.rotSpeed *= iF;
+    // speaking: rhythm follows the live audio amplitude
+    const wS = weights.speaking * amplitude;
+    P.spread += 0.10 * wS;
+    P.sizeMul += 0.55 * wS;
+    P.lineOpacity = clamp01(P.lineOpacity + 0.45 * wS);
+    P.sparkRate += 3.0 * wS;
+    if (reducedMotion) {
+      P.drift = 0; P.wobble = 0; P.jitter = 0; P.sparkRate = 0; P.rotSpeed = 0; P.cluster = 0;
+    }
+  }
+
+  // --- spark helpers ----------------------------------------------------------------
+  function spawnSpark(a, hops) {
+    if (sparkCount >= SPARK_CAP || nbCount[a] === 0) return;
+    const b = nbIdx[a * MAX_NB + ((Math.random() * nbCount[a]) | 0)];
+    const i = sparkCount++;
+    spA[i] = a; spB[i] = b; spT[i] = 0;
+    spSpeed[i] = 2.2 + Math.random() * 2.2;
+    spHops[i] = hops;
+  }
+
+  // --- main loop ----------------------------------------------------------------------
+  const clock = new THREE.Clock();
+  let t = 0, raf = 0, disposed = false, hidden = false, simOffset = 0;
+  let emaDt = 16, slowFor = 0, activeN = N; // adaptive quality
+  const _c = new THREE.Color();
+
+  function frame() {
+    if (disposed || hidden) return;
+    raf = requestAnimationFrame(frame);
+    step(Math.min(clock.getDelta(), 0.05), performance.now());
+  }
+
+  function step(dt, nowMs) {
+    t += dt;
+
+    // Theatre anchors sequence playback to performance.now(), so driver
+    // ticks must be on that clock (a synthetic clock stalls playback).
+    if (theatreDriver) theatreDriver.tick(nowMs ?? performance.now());
+    // shim oscillators / transition when Theatre is absent
+    else {
+      osc.breath = 0.5 - 0.5 * Math.cos((t * 2 * Math.PI) / 4);
+      osc.shimmer = 0.5 + 0.28 * Math.sin(t * 1.7) + 0.22 * Math.sin(t * 3.4);
+      if (shimXf) {
+        shimXf.t += dt;
+        const p = clamp01(shimXf.t / XF_LEN);
+        onTransitionProgress(easeInOutCubic(p));
+        if (p >= 1) shimXf = null;
+      }
+    }
+
+    blendParams();
+
+    // palette drift toward target emotion
+    const ck = 1 - Math.exp(-dt * 2.5);
+    for (const k in cur) cur[k].lerp(tgt[k], ck);
+
+    // thinking clusters: build → snap-scatter
+    if (P.cluster > 0.01) {
+      clusterTimer += dt;
+      clusterPhase += dt / 1.15;
+      if (clusterPhase >= 1) { clusterPhase = 0; reseedClusters(); }
+      if (clusterTimer > 6) { clusterTimer = 0; reseedClusters(); }
+    }
+    const clusterPull = P.cluster * Math.pow(clusterPhase, 1.6);
+
+    // --- integrate particles ---
+    if (symPhase) symClock += dt;
+    // while a symbol is shown, shorten connections so lines trace the glyph
+    // strokes instead of webbing across it
+    let symW = 0;
+    if (symPhase === 1) symW = clamp01(symClock / 0.5);
+    else if (symPhase === 2) symW = 1;
+    else if (symPhase === 3) symW = 1 - clamp01(symClock / SYM_RELEASE);
+    if (symW > 0) {
+      P.lineDist += (0.55 - P.lineDist) * symW;
+      P.lineOpacity = Math.max(P.lineOpacity, 0.55 * symW);
+    }
+    const smooth = 1 - Math.exp(-dt * 5);
+    for (let i = 0; i < activeN; i++) {
+      const i3 = i * 3;
+      let tx, ty, tz;
+      if (symPhase === 1 || symPhase === 2) {
+        const p = symPhase === 2 ? 1 : clamp01((symClock - symDelay[i]) / symDur[i]);
+        const e = easeInOutCubic(p);
+        tx = symStart[i3] + (symTarget[i3] - symStart[i3]) * e;
+        ty = symStart[i3 + 1] + (symTarget[i3 + 1] - symStart[i3 + 1]) * e;
+        tz = symStart[i3 + 2] + (symTarget[i3 + 2] - symStart[i3 + 2]) * e;
+        // micro-jitter while held, so the glyph stays alive, not frozen
+        const j = symPhase === 2 ? 0.018 : 0.006;
+        tx += Math.sin(t * 3.1 + pPhase[i3]) * j;
+        ty += Math.sin(t * 2.7 + pPhase[i3 + 1]) * j;
+      } else {
+        tx = home[i3] * P.spread + Math.sin(t * pFreq[i3] * P.drift * 2 + pPhase[i3]) * P.wobble;
+        ty = home[i3 + 1] * P.spread + Math.sin(t * pFreq[i3 + 1] * P.drift * 2 + pPhase[i3 + 1]) * P.wobble;
+        tz = home[i3 + 2] * P.spread + Math.sin(t * pFreq[i3 + 2] * P.drift * 2 + pPhase[i3 + 2]) * P.wobble;
+        if (clusterPull > 0 && clusterId[i] >= 0) {
+          const c3 = clusterId[i] * 3;
+          tx += (clusterCenter[c3] - tx) * clusterPull;
+          ty += (clusterCenter[c3 + 1] - ty) * clusterPull;
+          tz += (clusterCenter[c3 + 2] - tz) * clusterPull;
+        }
+        if (symPhase === 3) {
+          // staggered release back into the cloud
+          const p = clamp01((symClock - symDelay[i]) / (SYM_RELEASE * 0.85));
+          const e = easeInOutCubic(p);
+          tx = symTarget[i3] + (tx - symTarget[i3]) * e;
+          ty = symTarget[i3 + 1] + (ty - symTarget[i3 + 1]) * e;
+          tz = symTarget[i3 + 2] + (tz - symTarget[i3 + 2]) * e;
+        }
+        if (P.jitter > 0.001) {
+          tx += (Math.random() - 0.5) * P.jitter;
+          ty += (Math.random() - 0.5) * P.jitter;
+          tz += (Math.random() - 0.5) * P.jitter;
+        }
+      }
+      pos[i3] += (tx - pos[i3]) * smooth;
+      pos[i3 + 1] += (ty - pos[i3 + 1]) * smooth;
+      pos[i3 + 2] += (tz - pos[i3 + 2]) * smooth;
+
+      // flash decay + per-dot color/size
+      flash[i] *= Math.exp(-dt * 4.5);
+      _c.copy(cur.base).lerp(cur.tip, pMix[i]);
+      const glow = 0.72 + 0.28 * osc.breath + flash[i] * 1.4;
+      dotCol[i3] = Math.min(1.6, _c.r * glow + flash[i] * 0.5);
+      dotCol[i3 + 1] = Math.min(1.6, _c.g * glow + flash[i] * 0.5);
+      dotCol[i3 + 2] = Math.min(1.6, _c.b * glow + flash[i] * 0.5);
+      dotSize[i] = 0.085 * pSize[i] * P.sizeMul * (1 + flash[i] * 1.3 + P.breathAmt * (osc.breath - 0.5));
+    }
+
+    // symbol phase machine
+    if (symPhase === 1 && symClock > SYM_FORM) { symPhase = 2; symClock = 0; }
+    else if (symPhase === 2 && symClock > SYM_HOLD) {
+      symPhase = 3; symClock = 0;
+      for (let i = 0; i < N; i++) { symDelay[i] = Math.random() * 0.25; symTarget.set(pos.subarray(i * 3, i * 3 + 3), i * 3); }
+    } else if (symPhase === 3 && symClock > SYM_RELEASE + 0.3) symPhase = 0;
+
+    // during symbol display, ease the cloud to face the camera
+    const targetRotY = symPhase ? Math.round(group.rotation.y / (Math.PI * 2)) * Math.PI * 2 : group.rotation.y + P.rotSpeed * dt;
+    group.rotation.y += (targetRotY - group.rotation.y) * (symPhase ? smooth : 1);
+    group.rotation.x = Math.sin(t * 0.11) * 0.06 * (symPhase ? 0.2 : 1);
+
+    // --- proximity lines + neighbour lists ---
+    nbCount.fill(0, 0, activeN);
+    const connCount = new Uint8Array(activeN);
+    const maxD = P.lineDist, maxD2 = maxD * maxD;
+    const lo = P.lineOpacity * (0.9 + 0.18 * osc.shimmer);
+    for (let i = 0; i < activeN; i++) {
+      if (connCount[i] >= MAX_CONN_PER) continue;
+      const i3 = i * 3;
+      for (let j = i + 1; j < activeN; j++) {
+        if (connCount[j] >= MAX_CONN_PER) continue;
+        const j3 = j * 3;
+        const dx = pos[i3] - pos[j3], dy = pos[i3 + 1] - pos[j3 + 1], dz = pos[i3 + 2] - pos[j3 + 2];
+        const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 > maxD2) continue;
+        connCount[i]++; connCount[j]++;
+        if (nbCount[i] < MAX_NB) nbIdx[i * MAX_NB + nbCount[i]++] = j;
+        if (nbCount[j] < MAX_NB) nbIdx[j * MAX_NB + nbCount[j]++] = i;
+        const key = i * N + j;
+        pairTarget[key] = (1 - Math.sqrt(d2) / maxD) * lo * (1 + (flash[i] + flash[j]) * 1.5);
+        if (!pairLive[key]) { pairLive[key] = 1; livePairs.push(key); }
+        if (connCount[i] >= MAX_CONN_PER) break;
+      }
+    }
+    // ease each live pair toward its target and emit the surviving segments
+    const kIn = 1 - Math.exp(-dt * 9), kOut = 1 - Math.exp(-dt * 5);
+    let seg = 0;
+    for (let li = 0; li < livePairs.length; li++) {
+      const key = livePairs[li];
+      const target = pairTarget[key];
+      pairTarget[key] = 0;
+      let a = pairAlpha[key];
+      a += (target - a) * (target > a ? kIn : kOut);
+      if (a < 0.004 && target === 0) {
+        pairAlpha[key] = 0; pairLive[key] = 0;
+        livePairs[li--] = livePairs[livePairs.length - 1];
+        livePairs.pop();
+        continue;
+      }
+      pairAlpha[key] = a;
+      if (seg >= SEG_CAP) continue;
+      const pi3 = ((key / N) | 0) * 3, pj3 = (key % N) * 3;
+      const s6 = seg * 6;
+      linePos[s6] = pos[pi3]; linePos[s6 + 1] = pos[pi3 + 1]; linePos[s6 + 2] = pos[pi3 + 2];
+      linePos[s6 + 3] = pos[pj3]; linePos[s6 + 4] = pos[pj3 + 1]; linePos[s6 + 5] = pos[pj3 + 2];
+      // additive blending: alpha lives in the RGB scale
+      lineCol[s6] = lineCol[s6 + 3] = cur.line.r * a;
+      lineCol[s6 + 1] = lineCol[s6 + 4] = cur.line.g * a;
+      lineCol[s6 + 2] = lineCol[s6 + 5] = cur.line.b * a;
+      seg++;
+    }
+    lineGeo.setDrawRange(0, seg * 2);
+    lineGeo.attributes.position.needsUpdate = true;
+    lineGeo.attributes.color.needsUpdate = true;
+
+    // --- sparks: spawn, travel, arrive (flash + chain) ---
+    if (Math.random() < P.sparkRate * dt) spawnSpark((Math.random() * activeN) | 0, 2);
+    for (let i = 0; i < sparkCount; i++) {
+      spT[i] += dt * spSpeed[i];
+      if (spT[i] >= 1) {
+        const b = spB[i];
+        flash[b] = 1;
+        if (spHops[i] > 0 && Math.random() < 0.75) {
+          spawnSpark(b, spHops[i] - 1);
+          if (Math.random() < 0.4) spawnSpark(b, spHops[i] - 1);
+        }
+        sparkCount--;
+        spA[i] = spA[sparkCount]; spB[i] = spB[sparkCount];
+        spT[i] = spT[sparkCount]; spSpeed[i] = spSpeed[sparkCount]; spHops[i] = spHops[sparkCount];
+        i--; continue;
+      }
+      const a3 = spA[i] * 3, b3 = spB[i] * 3, k = spT[i], i3 = i * 3;
+      sparkPos[i3] = pos[a3] + (pos[b3] - pos[a3]) * k;
+      sparkPos[i3 + 1] = pos[a3 + 1] + (pos[b3 + 1] - pos[a3 + 1]) * k;
+      sparkPos[i3 + 2] = pos[a3 + 2] + (pos[b3 + 2] - pos[a3 + 2]) * k;
+      const br = Math.sin(k * Math.PI) * 1.4;
+      sparkColArr[i3] = cur.spark.r * br + br * 0.4;
+      sparkColArr[i3 + 1] = cur.spark.g * br + br * 0.4;
+      sparkColArr[i3 + 2] = cur.spark.b * br + br * 0.4;
+      sparkSizeArr[i] = 0.06 + 0.05 * br;
+    }
+    sparkGeo.setDrawRange(0, sparkCount);
+    sparkGeo.attributes.position.needsUpdate = true;
+    sparkGeo.attributes.aColor.needsUpdate = true;
+    sparkGeo.attributes.aSize.needsUpdate = true;
+
+    dotGeo.setDrawRange(0, activeN);
+    dotGeo.attributes.position.needsUpdate = true;
+    dotGeo.attributes.aColor.needsUpdate = true;
+    dotGeo.attributes.aSize.needsUpdate = true;
+
+    // adaptive quality: sustained slow frames → shrink the cloud a step
+    emaDt = emaDt * 0.95 + dt * 1000 * 0.05;
+    slowFor = emaDt > 20 ? slowFor + dt : 0;
+    if (slowFor > 3 && activeN > 110) {
+      activeN = Math.max(110, (activeN * 0.75) | 0);
+      slowFor = 0;
+      console.info('[chloe-avatar] adaptive quality: particles →', activeN);
+    }
+
+    renderer.render(scene, camera);
+  }
+
+  // --- sizing / visibility -----------------------------------------------------------
+  function resize() {
+    const w = container.clientWidth || 390, h = container.clientHeight || 640;
+    camera.aspect = w / h;
+    // pull the camera back until the whole cloud (incl. wobble margin) fits
+    // the frustum — portrait phones are narrower than the cloud is wide
+    const tanHalf = Math.tan((camera.fov * Math.PI) / 360);
+    const xExt = RADIUS * 0.92 + 0.35, yExt = RADIUS * 1.12 + 0.35;
+    camera.position.z = Math.max(xExt / (tanHalf * camera.aspect), yExt / tanHalf) * 1.05;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h, false);
+    const px = h * renderer.getPixelRatio();
+    const scale = px / (2 * Math.tan((camera.fov * Math.PI) / 360));
+    dotMat.uniforms.uPixelScale.value = scale;
+    sparkMat.uniforms.uPixelScale.value = scale;
+  }
+  const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null;
+  ro?.observe(container);
+  resize();
+
+  function onVisibility() {
+    hidden = document.hidden;
+    if (!hidden && !disposed) { clock.getDelta(); frame(); }
+    else cancelAnimationFrame(raf);
+  }
+  document.addEventListener('visibilitychange', onVisibility);
+  frame();
+
+  // --- public API ----------------------------------------------------------------------
+  return {
+    setState(next, o = {}) {
+      if (o.amplitude !== undefined) amplitude = clamp01(o.amplitude);
+      if (o.emotion !== undefined) this.setEmotion(o.emotion);
+      if (!AVATAR_STATES.includes(next) || next === state) return;
+      state = next;
+      beginTransition();
+    },
+    setAmplitude(a) { amplitude = clamp01(a); },
+    setIntensity(v) { intensity = clamp01(v); },
+    setEmotion(e) {
+      if (!EMOTION_PALETTES[e]) return;
+      emotion = e;
+      for (const k in tgt) tgt[k].setHex(EMOTION_PALETTES[e][k]);
+    },
+    showSymbol(str) {
+      if (reducedMotion) return;
+      const s = String(str).trim();
+      if (s) showSymbol(s);
+    },
+    getState: () => state,
+    getEmotion: () => emotion,
+    getStats() { return { fps: Math.round(1000 / emaDt), dots: activeN, state, emotion }; },
+    /** test hook: advance the simulation by dt seconds without rAF */
+    debugStep(dt = 1 / 60) {
+      if (disposed) return;
+      const d = Math.min(dt, 0.05);
+      simOffset += d * 1000;
+      step(d, performance.now() + simOffset);
+    },
+    /** test hook: current blended params, weights, oscillators */
+    getDebugInfo() { return { weights: { ...weights }, params: { ...P }, osc: { ...osc }, amplitude, intensity, sparkCount, activeN, fps: Math.round(1000 / emaDt), theatre: !!theatreDriver, xf: { calls: dbgXf.calls, lastP: dbgXf.lastP, playCalls: dbgXf.playCalls, seqPos: dbgXf.seqPos() } }; },
+    dispose() {
+      disposed = true;
+      cancelAnimationFrame(raf);
+      document.removeEventListener('visibilitychange', onVisibility);
+      ro?.disconnect();
+      dotGeo.dispose(); lineGeo.dispose(); sparkGeo.dispose();
+      dotMat.dispose(); lineMat.dispose(); sparkMat.dispose();
+      renderer.dispose();
+      renderer.domElement.remove();
+    },
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Page glue: Theatre.js is optional — if the CDN is unreachable (offline
+// phone), the core falls back to its built-in timing shim.
+// ---------------------------------------------------------------------------
+let theatre = null;
+// Theatre.js intentionally not loaded: core uses its built-in rAF timing shim.
+
+const QS = new URLSearchParams(location.search);
+const DEBUG = QS.has('debug');
+
+// ?transparent → overlay mode: see-through background, clicks pass through
+// (embed over the fleet dashboard / phone shell)
+if (QS.has('transparent')) {
+  document.documentElement.style.background = 'transparent';
+  document.body.style.background = 'transparent';
+  document.getElementById('chloe').style.pointerEvents = 'none';
+}
+
+const avatar = createChloeAvatar(document.getElementById('chloe'), {
+  theatre,
+  emotion: 'neutral',
+  particleCount: QS.has('dots') ? +QS.get('dots') | 0
+    : (matchMedia('(max-width: 767px)').matches ? 150 : 300),
+  preserveDrawingBuffer: DEBUG, // allows canvas capture in the debug harness
+});
+window.avatar = avatar; // JS API: avatar.setState(state, {amplitude, emotion}), .showSymbol(str), ...
+
+// ---------------------------------------------------------------------------
+// window.ChloeAvatar — the fleet control surface (spec 2026-07-06).
+// States carry their own color signature: setState recolors to the matching
+// emotion unless a sticky emotion was set via setEmotion (clear it by
+// setting 'neutral' or 'auto').
+// ---------------------------------------------------------------------------
+const STATE_EMOTION = { idle: 'neutral', listening: 'listening', thinking: 'thinking', speaking: 'speaking' };
+let stickyEmotion = null;
+window.ChloeAvatar = {
+  setState(s) {
+    avatar.setState(s);
+    const e = stickyEmotion ?? STATE_EMOTION[s];
+    if (e) avatar.setEmotion(e);
+  },
+  setEmotion(e) {
+    if (e === 'auto' || e === 'neutral') {
+      stickyEmotion = null;
+      avatar.setEmotion(e === 'neutral' ? 'neutral' : (STATE_EMOTION[avatar.getState()] ?? 'neutral'));
+    } else {
+      stickyEmotion = e;
+      avatar.setEmotion(e);
+    }
+  },
+  triggerSymbol(str) { avatar.showSymbol(str); },
+  setAmplitude(a) { avatar.setAmplitude(a); },
+  setIntensity(v) { avatar.setIntensity(v); },
+  getState: () => avatar.getState(),
+  getEmotion: () => avatar.getEmotion(),
+  getStats: () => avatar.getStats(),
+  wsStatus: 'off',
+  avatar, // escape hatch to the raw engine
+};
+
+// Shared message schema (ws + postMessage): {"state":..} {"emotion":..}
+// {"symbol":..} {"amplitude":..} {"intensity":..} — any combination of keys.
+function applyMessage(m) {
+  if (!m || typeof m !== 'object') return;
+  if (m.state !== undefined) window.ChloeAvatar.setState(m.state);
+  if (m.emotion !== undefined) window.ChloeAvatar.setEmotion(m.emotion);
+  if (m.symbol !== undefined) window.ChloeAvatar.triggerSymbol(m.symbol);
+  if (m.amplitude !== undefined) window.ChloeAvatar.setAmplitude(+m.amplitude);
+  if (m.intensity !== undefined) window.ChloeAvatar.setIntensity(+m.intensity);
+}
+
+// postMessage control — lets a host page (e.g. the mobile PWA) drive an
+// embedded iframe even cross-origin:
+//   iframe.contentWindow.postMessage({ chloe: { state: 'thinking' } }, '*')
+addEventListener('message', (ev) => applyMessage(ev.data && ev.data.chloe));
+
+// ---------------------------------------------------------------------------
+// WebSocket control channel. Default ws://<page-host>:8765 (localhost on
+// file://); on https pages the default is wss://<page-host>/avatar-ws (the
+// nginx bridge proxy) because browsers block plain ws: from https origins.
+// Override: ?ws=host[:port] or ?ws=ws://host:port/path. Disable: ?nows.
+// ---------------------------------------------------------------------------
+if (!QS.has('nows')) {
+  let wsUrl = QS.get('ws') ||
+    (location.protocol === 'https:'
+      ? `wss://${location.host}/avatar-ws`
+      : `${location.hostname || 'localhost'}:8765`);
+  if (!/^wss?:\/\//.test(wsUrl)) {
+    if (!/:\d+$/.test(wsUrl)) wsUrl += ':8765';
+    wsUrl = `ws://${wsUrl}`;
+  }
+  let retry = 2000;
+  const setWs = (st) => {
+    window.ChloeAvatar.wsStatus = st;
+    dispatchEvent(new CustomEvent('chloe-ws', { detail: st }));
+  };
+  (function connect() {
+    let ws;
+    try { ws = new WebSocket(wsUrl); } catch { setWs('error'); return; }
+    setWs('connecting');
+    ws.onopen = () => { retry = 2000; setWs('connected'); };
+    ws.onmessage = (ev) => {
+      let m;
+      try { m = JSON.parse(ev.data); } catch { return; }
+      applyMessage(m);
+    };
+    ws.onclose = () => {
+      setWs('disconnected');
+      setTimeout(connect, retry);
+      retry = Math.min(retry * 1.5, 30000);
+    };
+    ws.onerror = () => ws.close();
+  })();
+}
+
+// --- debug panel (open with ?debug) ---
+if (DEBUG) {
+  const panel = document.getElementById('debug');
+  panel.classList.add('on');
+  const mark = (attr, val) => panel.querySelectorAll(`[data-${attr}]`).forEach(
+    (b) => b.classList.toggle('active', b.dataset[attr] === val));
+  panel.addEventListener('click', (e) => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    if (b.dataset.state) { ChloeAvatar.setState(b.dataset.state); mark('state', b.dataset.state); mark('emotion', avatar.getEmotion()); }
+    if (b.dataset.emotion) { ChloeAvatar.setEmotion(b.dataset.emotion); mark('emotion', b.dataset.emotion); }
+    if (b.dataset.symbol) ChloeAvatar.triggerSymbol(b.dataset.symbol);
+  });
+  document.getElementById('amp').addEventListener('input', (e) => ChloeAvatar.setAmplitude(+e.target.value));
+  document.getElementById('intensity').addEventListener('input', (e) => ChloeAvatar.setIntensity(+e.target.value));
+  let talkTimer = null;
+  document.getElementById('talk').addEventListener('click', (e) => {
+    if (talkTimer) {
+      clearInterval(talkTimer); talkTimer = null;
+      ChloeAvatar.setAmplitude(0); ChloeAvatar.setState('idle'); mark('state', 'idle');
+      e.target.classList.remove('active');
+    } else {
+      ChloeAvatar.setState('speaking'); mark('state', 'speaking');
+      let ph = 0;
+      talkTimer = setInterval(() => {
+        ph += 0.13;
+        ChloeAvatar.setAmplitude(Math.max(0, 0.45 + 0.4 * Math.sin(ph * 3.1) + 0.25 * Math.sin(ph * 7.7)));
+      }, 33);
+      e.target.classList.add('active');
+    }
+    mark('emotion', avatar.getEmotion());
+  });
+}
+</script>
+</body>
+</html>
